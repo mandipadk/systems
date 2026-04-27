@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background: #fbfaf7;
+  color: #1f2523;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(90deg, rgba(31, 37, 35, 0.035) 1px, transparent 1px),
+    linear-gradient(#fbfaf7, #f6f1e8);
+  background-size: 64px 64px, auto;
+  color: #1f2523;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(155, 77, 59, 0.2);
+}
+
+.prose-book {
+  font-family: Georgia, Cambria, "Times New Roman", serif;
+  font-size: 1.03rem;
+  line-height: 1.68;
+}
+
+.prose-book h3 {
+  margin-top: 1.55rem;
+  margin-bottom: 0.45rem;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.86rem;
+  line-height: 1.35;
+  color: #496170;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.prose-book h4 {
+  margin-top: 1.35rem;
+  margin-bottom: 0.35rem;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: #1f2523;
+}
+
+.prose-book p {
+  margin: 0.78rem 0;
+}
+
+.prose-book strong {
+  color: #1f2523;
+}
+
+.prose-book ul,
+.prose-book ol {
+  margin: 0.8rem 0 0.95rem 1.25rem;
+  padding: 0;
+}
+
+.prose-book li {
+  margin: 0.3rem 0;
+}
+
+.prose-book code {
+  border: 1px solid rgba(73, 97, 112, 0.16);
+  background: #f0ece4;
+  padding: 0.08rem 0.28rem;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82em;
+}
+
+.prose-book pre {
+  margin: 1rem 0;
+  overflow-x: auto;
+  border: 1px solid #d5cec1;
+  background: #202622;
+  padding: 1rem;
+  color: #f5f1e8;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.prose-book pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.prose-book blockquote {
+  margin: 1rem 0;
+  border-left: 3px solid #9b4d3b;
+  padding-left: 1rem;
+  color: rgba(31, 37, 35, 0.72);
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}

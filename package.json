@@ -1,0 +1,37 @@
+{
+  "name": "systems-learning-platform",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "prisma:generate": "prisma generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.8.2",
+    "lucide-react": "^0.511.0",
+    "mermaid": "^11.6.0",
+    "next": "^15.3.2",
+    "openai": "^4.103.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "zod": "^3.25.28"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/react": "^19.1.5",
+    "@types/react-dom": "^19.1.5",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.27.0",
+    "eslint-config-next": "^15.3.2",
+    "postcss": "^8.5.3",
+    "prisma": "^6.8.2",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3"
+  }
+}

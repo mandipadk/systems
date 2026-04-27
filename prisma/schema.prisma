@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Course {
+  id            String          @id @default(cuid())
+  topic         String
+  pathId        String?
+  title         String
+  summary       String
+  level         String
+  status        String          @default("generating")
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  modules       CourseModule[]
+  sources       Source[]
+  studyStates   StudyState[]
+  comments      SelectionComment[]
+  generationRun GenerationRun?
+}
+
+model CourseModule {
+  id        String   @id @default(cuid())
+  courseId  String
+  order     Int
+  title     String
+  summary   String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons   Lesson[]
+}
+
+model Lesson {
+  id             String       @id @default(cuid())
+  moduleId       String
+  order          Int
+  title          String
+  content        String
+  diagram        String?
+  diagramCaption String?
+  checkpoint     String
+  exercisePrompt String
+  hint           String
+  solution       String
+  transferNote   String
+  citations      Json
+  module         CourseModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  studyStates    StudyState[]
+  comments       SelectionComment[]
+}
+
+model Source {
+  id          String   @id @default(cuid())
+  courseId    String
+  title       String
+  url         String
+  publisher   String?
+  publishedAt String?
+  accessedAt  DateTime @default(now())
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+}
+
+model StudyState {
+  id               String   @id @default(cuid())
+  courseId         String
+  lessonId         String
+  completed        Boolean  @default(false)
+  bookmarked       Boolean  @default(false)
+  solutionRevealed Boolean  @default(false)
+  updatedAt        DateTime @updatedAt
+  course           Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lesson           Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, lessonId])
+}
+
+model GenerationRun {
+  id        String   @id @default(cuid())
+  courseId  String?  @unique
+  topic     String
+  status    String   @default("queued")
+  phase     String   @default("queued")
+  progress  Int      @default(0)
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  course    Course?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
+}
+
+model SelectionComment {
+  id           String   @id @default(cuid())
+  courseId     String
+  lessonId     String?
+  selectedText String
+  prompt       String
+  response     String
+  createdAt    DateTime @default(now())
+  course       Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lesson       Lesson?  @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+}
