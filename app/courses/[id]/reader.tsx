@@ -102,6 +102,52 @@ type ActiveSelection = {
   left: number;
 };
 
+const regenerationModes = [
+  {
+    value: "deeper",
+    label: "Deeper",
+    description: "Rewrite this lesson with more detail, examples, edge cases, and connective explanation."
+  },
+  {
+    value: "math",
+    label: "Math",
+    description: "Regenerate with more notation, definitions, derivations, and mathematical framing."
+  },
+  {
+    value: "code-trace",
+    label: "Code trace",
+    description: "Regenerate with pseudocode, implementation details, and step-by-step state traces."
+  },
+  {
+    value: "proof",
+    label: "Proof",
+    description: "Regenerate around invariants, correctness arguments, counterexamples, and proof sketches."
+  },
+  {
+    value: "intuition",
+    label: "Intuition",
+    description: "Regenerate around mental models and concrete intuition before formal details."
+  },
+  {
+    value: "interview-drills",
+    label: "Interview",
+    description: "Regenerate with interview patterns, traps, constraints, and practice ladders."
+  }
+] as const;
+
+type RegenerationMode = (typeof regenerationModes)[number]["value"];
+
+function Tooltip({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <span className="group/tooltip relative inline-flex">
+      {children}
+      <span className="pointer-events-none absolute right-0 top-full z-40 mt-2 w-64 border border-rule bg-ink px-3 py-2 text-left text-xs leading-5 text-paper opacity-0 shadow-[0_12px_30px_rgba(31,37,35,0.18)] transition group-hover/tooltip:opacity-100 group-focus-within/tooltip:opacity-100">
+        {label}
+      </span>
+    </span>
+  );
+}
+
 export function CourseReader({ course }: { course: Course }) {
   const router = useRouter();
   const [pendingLessonId, setPendingLessonId] = useState("");
@@ -109,9 +155,7 @@ export function CourseReader({ course }: { course: Course }) {
   const [activeSelection, setActiveSelection] = useState<ActiveSelection | null>(null);
   const [commentPrompt, setCommentPrompt] = useState("Explain this more deeply with a concrete example.");
   const [commentPending, setCommentPending] = useState(false);
-  const [regenerateMode, setRegenerateMode] = useState<
-    "deeper" | "math" | "code-trace" | "proof" | "intuition" | "interview-drills"
-  >("deeper");
+  const [regenerateMode, setRegenerateMode] = useState<RegenerationMode>("deeper");
   const [comments, setComments] = useState(course.comments);
   const [state, setState] = useState<LocalState>(() => {
     return Object.fromEntries(course.studyStates.map((item) => [item.lessonId, item]));
@@ -119,6 +163,7 @@ export function CourseReader({ course }: { course: Course }) {
 
   const lessons = useMemo(() => course.modules.flatMap((module) => module.lessons), [course.modules]);
   const completed = lessons.filter((lesson) => state[lesson.id]?.completed).length;
+  const selectedMode = regenerationModes.find((mode) => mode.value === regenerateMode) ?? regenerationModes[0];
 
   async function patchState(lessonId: string, patch: Partial<StudyState>) {
     const previous = state[lessonId] ?? {
@@ -243,6 +288,7 @@ export function CourseReader({ course }: { course: Course }) {
               </div>
               <button
                 aria-label="Close explanation command"
+                title="Close this explanation command without saving a note."
                 className="text-ink/50 transition hover:text-ink"
                 onClick={() => setActiveSelection(null)}
               >
@@ -258,6 +304,7 @@ export function CourseReader({ course }: { course: Course }) {
             <button
               onClick={createComment}
               disabled={commentPending}
+              title="Ask AI to explain the selected text and save the answer under this lesson."
               className="mt-2 inline-flex min-h-9 w-full items-center justify-center gap-2 bg-ink px-3 text-sm text-paper transition hover:bg-steel disabled:opacity-50"
             >
               {commentPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
@@ -287,49 +334,64 @@ export function CourseReader({ course }: { course: Course }) {
                   <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-t border-rule pt-5">
                     <h3 className="font-serif text-2xl leading-tight text-ink">{lesson.title}</h3>
                     <div className="flex gap-2">
-                      <select
-                        aria-label="Regeneration mode"
-                        value={regenerateMode}
-                        onChange={(event) => setRegenerateMode(event.target.value as typeof regenerateMode)}
-                        className="h-10 border border-rule bg-paper px-2 text-xs text-ink/70 outline-none"
+                      <Tooltip
+                        label={`Regeneration mode: ${selectedMode.description} Changing this does not regenerate by itself; click the reload button next.`}
                       >
-                        <option value="deeper">Deeper</option>
-                        <option value="math">Math</option>
-                        <option value="code-trace">Code trace</option>
-                        <option value="proof">Proof</option>
-                        <option value="intuition">Intuition</option>
-                        <option value="interview-drills">Interview</option>
-                      </select>
-                      <button
-                        aria-label="Bookmark lesson"
-                        onClick={() => patchState(lesson.id, { bookmarked: !local?.bookmarked })}
-                        className={`inline-flex h-10 w-10 items-center justify-center border transition ${
-                          local?.bookmarked ? "border-moss bg-moss text-paper" : "border-rule bg-paper text-ink/60"
-                        }`}
+                        <select
+                          aria-label={`Regeneration mode. ${selectedMode.description}`}
+                          title={`Regeneration mode: ${selectedMode.description}`}
+                          value={regenerateMode}
+                          onChange={(event) => setRegenerateMode(event.target.value as RegenerationMode)}
+                          className="h-10 border border-rule bg-paper px-2 text-xs text-ink/70 outline-none"
+                        >
+                          {regenerationModes.map((mode) => (
+                            <option key={mode.value} value={mode.value} title={mode.description}>
+                              {mode.label}
+                            </option>
+                          ))}
+                        </select>
+                      </Tooltip>
+                      <Tooltip label={local?.bookmarked ? "Remove this lesson from your bookmarks." : "Bookmark this lesson so it is easy to return to later."}>
+                        <button
+                          aria-label={local?.bookmarked ? "Remove bookmark" : "Bookmark lesson"}
+                          title={local?.bookmarked ? "Remove bookmark" : "Bookmark this lesson"}
+                          onClick={() => patchState(lesson.id, { bookmarked: !local?.bookmarked })}
+                          className={`inline-flex h-10 w-10 items-center justify-center border transition ${
+                            local?.bookmarked ? "border-moss bg-moss text-paper" : "border-rule bg-paper text-ink/60"
+                          }`}
+                        >
+                          <Bookmark className="h-4 w-4" />
+                        </button>
+                      </Tooltip>
+                      <Tooltip label={local?.completed ? "Mark this lesson as not completed." : "Mark this lesson complete and update course progress."}>
+                        <button
+                          aria-label={local?.completed ? "Mark lesson incomplete" : "Mark lesson complete"}
+                          title={local?.completed ? "Mark incomplete" : "Mark complete"}
+                          onClick={() => patchState(lesson.id, { completed: !local?.completed })}
+                          className={`inline-flex h-10 w-10 items-center justify-center border transition ${
+                            local?.completed ? "border-moss bg-moss text-paper" : "border-rule bg-paper text-ink/60"
+                          }`}
+                        >
+                          <Check className="h-4 w-4" />
+                        </button>
+                      </Tooltip>
+                      <Tooltip
+                        label={`Regenerate this lesson using ${selectedMode.label} mode. This replaces only this lesson after the AI finishes.`}
                       >
-                        <Bookmark className="h-4 w-4" />
-                      </button>
-                      <button
-                        aria-label="Mark complete"
-                        onClick={() => patchState(lesson.id, { completed: !local?.completed })}
-                        className={`inline-flex h-10 w-10 items-center justify-center border transition ${
-                          local?.completed ? "border-moss bg-moss text-paper" : "border-rule bg-paper text-ink/60"
-                        }`}
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                      <button
-                        aria-label="Regenerate lesson"
-                        onClick={() => regenerate(lesson.id)}
-                        disabled={pendingLessonId === lesson.id || isRefreshing}
-                        className="inline-flex h-10 w-10 items-center justify-center border border-rule bg-paper text-ink/60 transition hover:border-steel hover:text-ink disabled:opacity-50"
-                      >
-                        {pendingLessonId === lesson.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <RefreshCcw className="h-4 w-4" />
-                        )}
-                      </button>
+                        <button
+                          aria-label={`Regenerate lesson using ${selectedMode.label} mode`}
+                          title={`Regenerate lesson using ${selectedMode.label} mode`}
+                          onClick={() => regenerate(lesson.id)}
+                          disabled={pendingLessonId === lesson.id || isRefreshing}
+                          className="inline-flex h-10 w-10 items-center justify-center border border-rule bg-paper text-ink/60 transition hover:border-steel hover:text-ink disabled:opacity-50"
+                        >
+                          {pendingLessonId === lesson.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCcw className="h-4 w-4" />
+                          )}
+                        </button>
+                      </Tooltip>
                     </div>
                   </div>
 
@@ -360,6 +422,7 @@ export function CourseReader({ course }: { course: Course }) {
                     </details>
                     <button
                       onClick={() => patchState(lesson.id, { solutionRevealed: true })}
+                      title="Reveal and persist the solution for this practice question."
                       className="mt-4 border border-rule px-3 py-2 text-sm text-ink/70 transition hover:border-moss hover:text-ink"
                     >
                       Reveal solution
