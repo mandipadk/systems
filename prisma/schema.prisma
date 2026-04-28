@@ -15,6 +15,7 @@ model Course {
   title         String
   summary       String
   level         String
+  dossier       Json?
   status        String          @default("generating")
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
@@ -49,6 +50,9 @@ model Lesson {
   solution       String
   transferNote   String
   citations      Json
+  contract       Json?
+  mistakeBank    Json?
+  reviewArtifacts Json?
   module         CourseModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
   studyStates    StudyState[]
   comments       SelectionComment[]
@@ -99,9 +103,15 @@ model LessonQualityReview {
   lessonId             String   @unique
   overallScore          Int
   shouldRevise          Boolean
+  dimensions            Json?
   issues                Json
   revisionInstructions  String
   revised               Boolean  @default(false)
+  revisionCount         Int      @default(0)
+  sourceCoverage        Float    @default(0)
+  exerciseDifficulty    String   @default("unknown")
+  diagramStatus         String   @default("unknown")
+  checks                Json?
   createdAt             DateTime @default(now())
   lesson                Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
 }

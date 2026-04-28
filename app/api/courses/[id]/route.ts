@@ -12,7 +12,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
         orderBy: { order: "asc" },
         include: {
           lessons: {
-            orderBy: { order: "asc" }
+            orderBy: { order: "asc" },
+            include: {
+              qualityReview: true
+            }
           }
         }
       }

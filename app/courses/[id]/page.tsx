@@ -18,7 +18,10 @@ export default async function CoursePage({ params }: { params: Promise<{ id: str
         orderBy: { order: "asc" },
         include: {
           lessons: {
-            orderBy: { order: "asc" }
+            orderBy: { order: "asc" },
+            include: {
+              qualityReview: true
+            }
           }
         }
       }

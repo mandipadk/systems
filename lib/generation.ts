@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "./db";
 import {
   courseOutlineSchema,
@@ -37,7 +38,16 @@ type LessonReview = {
 };
 
 type LessonWithQuality = GeneratedLesson & {
-  qualityReview?: LessonReview & { revised: boolean };
+  contract?: CourseOutline["modules"][number]["lessons"][number]["contract"];
+  qualityReview?: LessonReview & {
+    revised: boolean;
+    revisionCount: number;
+    dimensions: Record<string, number>;
+    sourceCoverage: number;
+    exerciseDifficulty: string;
+    diagramStatus: string;
+    checks: Record<string, unknown>;
+  };
 };
 
 type CourseWithQuality = Omit<GeneratedCourse, "modules"> & {
@@ -68,6 +78,10 @@ function extractText(response: unknown) {
   return JSON.stringify(response);
 }
 
+function toInputJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
 function normalizeDiagram(diagram?: string) {
   if (!diagram) return undefined;
   const cleaned = diagram
@@ -85,6 +99,49 @@ function normalizeLesson(lesson: GeneratedLesson): GeneratedLesson {
     ...lesson,
     diagram,
     diagramCaption: diagram ? lesson.diagramCaption : undefined
+  };
+}
+
+function countWords(text: string) {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function validateMarkdownTables(markdown: string) {
+  const lines = markdown.split("\n");
+  return lines.some((line, index) => {
+    const next = lines[index + 1] ?? "";
+    return line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*\|/.test(next);
+  });
+}
+
+function extractCodeFenceLanguages(markdown: string) {
+  return Array.from(markdown.matchAll(/```([a-zA-Z0-9_-]*)\n[\s\S]*?```/g)).map((match) => match[1] || "plain");
+}
+
+function validateLessonArtifacts(lesson: GeneratedLesson, sourceCount: number) {
+  const citations = lesson.citations ?? [];
+  const validCitations = citations.every((index) => Number.isInteger(index) && index >= 0 && index < sourceCount);
+  const uniqueCitationCount = new Set(citations).size;
+  const hasTable = validateMarkdownTables(lesson.content);
+  const codeFenceLanguages = extractCodeFenceLanguages(lesson.content);
+  const hasBalancedCodeFences = (lesson.content.match(/```/g) ?? []).length % 2 === 0;
+  const diagramStatus = lesson.diagram ? "present-normalized" : "missing-or-invalid";
+
+  return {
+    wordCount: countWords(lesson.content),
+    validCitations,
+    citationCount: citations.length,
+    uniqueCitationCount,
+    sourceCoverage: sourceCount ? uniqueCitationCount / sourceCount : 0,
+    hasTable,
+    codeFenceCount: codeFenceLanguages.length,
+    codeFenceLanguages,
+    hasBalancedCodeFences,
+    diagramStatus,
+    mistakeBankCount: lesson.mistakeBank?.length ?? 0,
+    flashcardCount: lesson.reviewArtifacts?.flashcards?.length ?? 0,
+    oralPromptCount: lesson.reviewArtifacts?.oralPrompts?.length ?? 0,
+    implementationDrillCount: lesson.reviewArtifacts?.implementationDrills?.length ?? 0
   };
 }
 
@@ -157,6 +214,8 @@ async function createCourseOutline(client: OpenAI, topic: string): Promise<Cours
 Requirements:
 - Exactly 10 modules.
 - Exactly 1 lesson per module.
+- Build the dossier first: source pack, prerequisite graph, concept map, terminology glossary, common misconceptions, canonical examples, and mastery outcomes.
+- Each lesson must include a chapter contract that specifies required examples, diagram, table, code trace, failure modes, and exercise targets.
 - Each lesson brief must describe the concrete lesson goal, not just name a topic.
 - Sequence the course like a technical book: early intuition, precise model, worked examples, implementation, pitfalls, transfer, and mastery.
 - Sources must be authoritative docs, papers, books, or high-quality engineering references.
@@ -175,6 +234,7 @@ async function createLesson(client: OpenAI, input: {
   moduleSummary: string;
   lessonTitle: string;
   lessonBrief: string;
+  contract: CourseOutline["modules"][number]["lessons"][number]["contract"];
 }): Promise<GeneratedLesson> {
   const sources = input.outline.sources
     .map((source, index) => `${index}. ${source.title} - ${source.url}`)
@@ -206,6 +266,11 @@ Module: ${input.moduleTitle}
 Module summary: ${input.moduleSummary}
 Lesson title: ${input.lessonTitle}
 Lesson goal: ${input.lessonBrief}
+Chapter contract:
+${JSON.stringify(input.contract)}
+
+Course dossier:
+${JSON.stringify(input.outline.dossier)}
 
 Allowed source indexes:
 ${sources}
@@ -215,6 +280,7 @@ Return one complete lesson.
 Requirements:
 - content must be long-form markdown, roughly 1400-2200 words.
 - Use concrete examples, worked traces, small code listings when relevant, edge cases, and common mistakes.
+- Satisfy every item in the chapter contract explicitly.
 - Prefer compact sections with meaningful headings. Avoid one-sentence paragraphs.
 - Include at least one of: a step-by-step trace, a comparison table, a code walkthrough, or a miniature design review.
 - If you include a table, use valid GitHub-flavored Markdown table syntax with a header separator row.
@@ -237,6 +303,7 @@ async function reviewLesson(client: OpenAI, input: {
   moduleTitle: string;
   lessonBrief: string;
   lesson: GeneratedLesson;
+  perspective: "technical-correctness" | "pedagogy" | "interview-transfer" | "anti-laziness";
 }): Promise<LessonReview> {
   const response = await client.responses.create({
     model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
@@ -252,8 +319,7 @@ async function reviewLesson(client: OpenAI, input: {
     input: [
       {
         role: "system",
-        content:
-          "You are a severe editor for a personal technical book. Your job is to detect shallow AI writing, missing examples, weak explanations, broken structure, and content that would not help a serious learner. Be strict."
+        content: `You are a severe ${input.perspective} editor for a personal technical book. Your job is to detect shallow AI writing, missing examples, weak explanations, broken structure, and content that would not help a serious learner. Be strict.`
       },
       {
         role: "user",
@@ -289,6 +355,7 @@ async function reviseLesson(client: OpenAI, input: {
   moduleSummary: string;
   lessonTitle: string;
   lessonBrief: string;
+  contract: CourseOutline["modules"][number]["lessons"][number]["contract"];
   draft: GeneratedLesson;
   review: LessonReview;
 }): Promise<GeneratedLesson> {
@@ -321,6 +388,8 @@ Module: ${input.moduleTitle}
 Module summary: ${input.moduleSummary}
 Lesson title: ${input.lessonTitle}
 Lesson goal: ${input.lessonBrief}
+Chapter contract:
+${JSON.stringify(input.contract)}
 
 Allowed source indexes:
 ${sources}
@@ -343,6 +412,27 @@ Return the full revised lesson JSON. Make the content denser, more concrete, and
   return normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
 }
 
+function combineReviews(reviews: Array<LessonReview & { perspective: string }>, checks: ReturnType<typeof validateLessonArtifacts>) {
+  const dimensions = Object.fromEntries(reviews.map((review) => [review.perspective, review.overallScore]));
+  const overallScore = Math.round(reviews.reduce((sum, review) => sum + review.overallScore, 0) / reviews.length);
+  const issues = reviews.flatMap((review) => review.issues.map((issue) => `${review.perspective}: ${issue}`));
+  const shouldRevise =
+    reviews.some((review) => review.shouldRevise || review.overallScore < 8) ||
+    !checks.validCitations ||
+    !checks.hasBalancedCodeFences ||
+    checks.wordCount < 1100 ||
+    checks.mistakeBankCount < 2 ||
+    checks.implementationDrillCount < 1;
+
+  return {
+    overallScore,
+    shouldRevise,
+    issues,
+    revisionInstructions: reviews.map((review) => `${review.perspective}: ${review.revisionInstructions}`).join("\n\n"),
+    dimensions
+  };
+}
+
 async function callOpenAIForCourse(
   topic: string,
   onProgress: (phase: string, progress: number) => Promise<void>
@@ -358,25 +448,35 @@ async function callOpenAIForCourse(
   const modules: CourseWithQuality["modules"] = [];
 
   for (const module of outline.modules) {
-    const lessons: GeneratedLesson[] = [];
+    const lessons: LessonWithQuality[] = [];
     for (const lesson of module.lessons) {
       const progress = 25 + Math.floor((completedLessons / Math.max(totalLessons, 1)) * 60);
       await onProgress(`writing lesson ${completedLessons + 1} of ${totalLessons}: ${lesson.title}`, progress);
       const draft = await createLesson(client, {
         topic,
         outline,
-        moduleTitle: module.title,
-        moduleSummary: module.summary,
-        lessonTitle: lesson.title,
-        lessonBrief: lesson.brief
-      });
+          moduleTitle: module.title,
+          moduleSummary: module.summary,
+          lessonTitle: lesson.title,
+          lessonBrief: lesson.brief,
+          contract: lesson.contract
+        });
       await onProgress(`reviewing lesson ${completedLessons + 1} of ${totalLessons}: ${lesson.title}`, progress + 2);
-      const review = await reviewLesson(client, {
-        topic,
-        moduleTitle: module.title,
-        lessonBrief: lesson.brief,
-        lesson: draft
-      });
+      const perspectives = ["technical-correctness", "pedagogy", "interview-transfer", "anti-laziness"] as const;
+      const reviews = await Promise.all(
+        perspectives.map(async (perspective) => ({
+          ...(await reviewLesson(client, {
+            topic,
+            moduleTitle: module.title,
+            lessonBrief: lesson.brief,
+            lesson: draft,
+            perspective
+          })),
+          perspective
+        }))
+      );
+      const draftChecks = validateLessonArtifacts(draft, outline.sources.length);
+      const review = combineReviews(reviews, draftChecks);
       const finalLesson: LessonWithQuality =
         review.shouldRevise || review.overallScore < 8
           ? await reviseLesson(client, {
@@ -386,13 +486,21 @@ async function callOpenAIForCourse(
               moduleSummary: module.summary,
               lessonTitle: lesson.title,
               lessonBrief: lesson.brief,
+              contract: lesson.contract,
               draft,
               review
             })
           : draft;
+      const finalChecks = validateLessonArtifacts(finalLesson, outline.sources.length);
+      finalLesson.contract = lesson.contract;
       finalLesson.qualityReview = {
         ...review,
-        revised: finalLesson !== draft
+        revised: finalLesson !== draft,
+        revisionCount: finalLesson !== draft ? 1 : 0,
+        sourceCoverage: finalChecks.sourceCoverage,
+        exerciseDifficulty: "moderate",
+        diagramStatus: finalChecks.diagramStatus,
+        checks: finalChecks
       };
       lessons.push(finalLesson);
       completedLessons += 1;
@@ -404,13 +512,19 @@ async function callOpenAIForCourse(
     });
   }
 
-  return generatedCourseSchema.parse({
+  const validated = generatedCourseSchema.parse({
     title: outline.title,
     summary: outline.summary,
     level: outline.level,
+    dossier: outline.dossier,
     sources: outline.sources,
     modules
   });
+
+  return {
+    ...validated,
+    modules
+  };
 }
 
 async function persistCourse(runId: string, topic: string, pathId: string | null, course: CourseWithQuality) {
@@ -422,6 +536,7 @@ async function persistCourse(runId: string, topic: string, pathId: string | null
       title: course.title,
       summary: course.summary,
       level: course.level,
+      dossier: toInputJson(course.dossier),
       status: "ready",
       generationRun: {
         connect: { id: runId }
@@ -452,14 +567,23 @@ async function persistCourse(runId: string, topic: string, pathId: string | null
               solution: lesson.solution,
               transferNote: lesson.transferNote,
               citations: lesson.citations,
+              contract: lesson.contract ? toInputJson(lesson.contract) : undefined,
+              mistakeBank: toInputJson(lesson.mistakeBank),
+              reviewArtifacts: toInputJson(lesson.reviewArtifacts),
               qualityReview: lesson.qualityReview
                 ? {
                     create: {
                       overallScore: lesson.qualityReview.overallScore,
                       shouldRevise: lesson.qualityReview.shouldRevise,
-                      issues: lesson.qualityReview.issues,
+                      dimensions: toInputJson(lesson.qualityReview.dimensions),
+                      issues: toInputJson(lesson.qualityReview.issues),
                       revisionInstructions: lesson.qualityReview.revisionInstructions,
-                      revised: lesson.qualityReview.revised
+                      revised: lesson.qualityReview.revised,
+                      revisionCount: lesson.qualityReview.revisionCount,
+                      sourceCoverage: lesson.qualityReview.sourceCoverage,
+                      exerciseDifficulty: lesson.qualityReview.exerciseDifficulty,
+                      diagramStatus: lesson.qualityReview.diagramStatus,
+                      checks: toInputJson(lesson.qualityReview.checks)
                     }
                   }
                 : undefined
@@ -541,7 +665,10 @@ export async function generateCourseForRun(runId: string, topic: string, pathId:
   return savedId;
 }
 
-export async function regenerateLesson(lessonId: string) {
+export async function regenerateLesson(
+  lessonId: string,
+  mode: "deeper" | "math" | "code-trace" | "proof" | "intuition" | "interview-drills" = "deeper"
+) {
   const lesson = await prisma.lesson.findUnique({
     where: { id: lessonId },
     include: {
@@ -576,7 +703,7 @@ export async function regenerateLesson(lessonId: string) {
         {
           role: "system",
           content:
-            "Regenerate one rigorous course lesson. Preserve the surrounding course intent. Make it clearer, deeper, and more concrete."
+            "Regenerate one rigorous course lesson. Preserve the surrounding course intent. Make it clearer, deeper, more concrete, and more useful for serious study."
         },
         {
           role: "user",
@@ -586,7 +713,17 @@ Lesson to improve: ${lesson.title}
 Previous content:
 ${lesson.content}
 
-Return one complete lesson with markdown content, Mermaid diagram, checkpoint, exercise, hint, solution, transfer note, and source citation indexes.`
+Targeted regeneration mode: ${mode}
+
+Mode guidance:
+- deeper: expand the chapter with denser explanation, examples, failure modes, and connective tissue.
+- math: add formal definitions, notation, derivations, and proof sketches where appropriate.
+- code-trace: add executable-looking pseudocode/code walkthroughs and state traces.
+- proof: emphasize invariants, correctness arguments, and counterexamples.
+- intuition: rebuild the lesson around mental models and concrete analogies without becoming fluffy.
+- interview-drills: add pattern recognition, constraints, traps, and practice ladders.
+
+Return one complete lesson with markdown content, Mermaid diagram, checkpoint, exercise, hint, solution, transfer note, source citation indexes, mistakeBank, and reviewArtifacts.`
         }
       ]
   } as never, { timeout: OPENAI_TIMEOUT_MS });

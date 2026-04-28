@@ -28,6 +28,32 @@ type Lesson = {
   solution: string;
   transferNote: string;
   citations: number[];
+  contract?: {
+    requiredExamples?: string[];
+    requiredDiagrams?: string[];
+    requiredTable?: string;
+    requiredCodeTrace?: string;
+    requiredFailureModes?: string[];
+    exerciseTargets?: string[];
+  } | null;
+  mistakeBank?: Array<{
+    mistake: string;
+    whyItTempts: string;
+    counterexample: string;
+    debuggingHeuristic: string;
+  }> | null;
+  reviewArtifacts?: {
+    flashcards?: string[];
+    oralPrompts?: string[];
+    implementationDrills?: string[];
+  } | null;
+  qualityReview?: {
+    overallScore: number;
+    revised: boolean;
+    revisionCount: number;
+    diagramStatus: string;
+    exerciseDifficulty: string;
+  } | null;
 };
 
 type Module = {
@@ -83,6 +109,9 @@ export function CourseReader({ course }: { course: Course }) {
   const [activeSelection, setActiveSelection] = useState<ActiveSelection | null>(null);
   const [commentPrompt, setCommentPrompt] = useState("Explain this more deeply with a concrete example.");
   const [commentPending, setCommentPending] = useState(false);
+  const [regenerateMode, setRegenerateMode] = useState<
+    "deeper" | "math" | "code-trace" | "proof" | "intuition" | "interview-drills"
+  >("deeper");
   const [comments, setComments] = useState(course.comments);
   const [state, setState] = useState<LocalState>(() => {
     return Object.fromEntries(course.studyStates.map((item) => [item.lessonId, item]));
@@ -109,7 +138,11 @@ export function CourseReader({ course }: { course: Course }) {
 
   async function regenerate(lessonId: string) {
     setPendingLessonId(lessonId);
-    await fetch(`/api/sections/${lessonId}/regenerate`, { method: "POST" });
+    await fetch(`/api/sections/${lessonId}/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: regenerateMode })
+    });
     setPendingLessonId("");
     startTransition(() => router.refresh());
   }
@@ -254,6 +287,19 @@ export function CourseReader({ course }: { course: Course }) {
                   <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-t border-rule pt-5">
                     <h3 className="font-serif text-2xl leading-tight text-ink">{lesson.title}</h3>
                     <div className="flex gap-2">
+                      <select
+                        aria-label="Regeneration mode"
+                        value={regenerateMode}
+                        onChange={(event) => setRegenerateMode(event.target.value as typeof regenerateMode)}
+                        className="h-10 border border-rule bg-paper px-2 text-xs text-ink/70 outline-none"
+                      >
+                        <option value="deeper">Deeper</option>
+                        <option value="math">Math</option>
+                        <option value="code-trace">Code trace</option>
+                        <option value="proof">Proof</option>
+                        <option value="intuition">Intuition</option>
+                        <option value="interview-drills">Interview</option>
+                      </select>
                       <button
                         aria-label="Bookmark lesson"
                         onClick={() => patchState(lesson.id, { bookmarked: !local?.bookmarked })}
@@ -327,6 +373,59 @@ export function CourseReader({ course }: { course: Course }) {
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brick">Transfer</p>
                     <p className="mt-2 text-sm leading-7 text-ink/70">{lesson.transferNote}</p>
                   </div>
+
+                  {lesson.mistakeBank?.length ? (
+                    <div className="my-6 border border-rule bg-paper p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brick">Mistake bank</p>
+                      <div className="mt-3 space-y-3">
+                        {lesson.mistakeBank.map((item, index) => (
+                          <div key={`${lesson.id}-mistake-${index}`} className="border-t border-rule pt-3 first:border-t-0 first:pt-0">
+                            <p className="text-sm font-semibold text-ink">{item.mistake}</p>
+                            <p className="mt-1 text-sm leading-6 text-ink/65">Why it tempts: {item.whyItTempts}</p>
+                            <p className="mt-1 text-sm leading-6 text-ink/65">Counterexample: {item.counterexample}</p>
+                            <p className="mt-1 text-sm leading-6 text-ink/65">Debugging heuristic: {item.debuggingHeuristic}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {lesson.reviewArtifacts ? (
+                    <div className="my-6 grid gap-3 border border-rule bg-paper p-4 md:grid-cols-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-moss">Flashcards</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {(lesson.reviewArtifacts.flashcards ?? []).map((item, index) => (
+                            <li key={`${lesson.id}-flashcard-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-moss">Oral prompts</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {(lesson.reviewArtifacts.oralPrompts ?? []).map((item, index) => (
+                            <li key={`${lesson.id}-oral-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-moss">Drills</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {(lesson.reviewArtifacts.implementationDrills ?? []).map((item, index) => (
+                            <li key={`${lesson.id}-drill-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {lesson.qualityReview ? (
+                    <div className="mt-6 border-t border-rule pt-4 text-xs leading-6 text-ink/45">
+                      Quality: {lesson.qualityReview.overallScore}/10
+                      {lesson.qualityReview.revised ? `, revised ${lesson.qualityReview.revisionCount}x` : ""}
+                      {lesson.qualityReview.diagramStatus ? `, diagram ${lesson.qualityReview.diagramStatus}` : ""}
+                    </div>
+                  ) : null}
 
                   {lessonComments.length ? (
                     <div className="my-6 space-y-3 border-t border-rule pt-5">
