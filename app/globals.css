@@ -114,6 +114,41 @@ input {
   color: rgba(31, 37, 35, 0.72);
 }
 
+.prose-book table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 1rem 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border: 1px solid #d5cec1;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.prose-book thead {
+  background: #eee8dc;
+}
+
+.prose-book th,
+.prose-book td {
+  min-width: 9rem;
+  border: 1px solid #d5cec1;
+  padding: 0.55rem 0.7rem;
+  vertical-align: top;
+}
+
+.prose-book th {
+  color: #1f2523;
+  font-weight: 650;
+  text-align: left;
+}
+
+.prose-book tbody tr:nth-child(even) {
+  background: rgba(244, 239, 230, 0.6);
+}
+
 .mermaid svg {
   max-width: 100%;
   height: auto;

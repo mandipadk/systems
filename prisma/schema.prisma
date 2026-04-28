@@ -10,6 +10,7 @@ datasource db {
 model Course {
   id            String          @id @default(cuid())
   topic         String
+  topicKey      String          @default("")
   pathId        String?
   title         String
   summary       String
@@ -51,6 +52,7 @@ model Lesson {
   module         CourseModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
   studyStates    StudyState[]
   comments       SelectionComment[]
+  qualityReview  LessonQualityReview?
 }
 
 model Source {
@@ -81,6 +83,7 @@ model StudyState {
 model GenerationRun {
   id        String   @id @default(cuid())
   courseId  String?  @unique
+  replaceCourseId String?
   topic     String
   status    String   @default("queued")
   phase     String   @default("queued")
@@ -89,6 +92,18 @@ model GenerationRun {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   course    Course?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
+}
+
+model LessonQualityReview {
+  id                   String   @id @default(cuid())
+  lessonId             String   @unique
+  overallScore          Int
+  shouldRevise          Boolean
+  issues                Json
+  revisionInstructions  String
+  revised               Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  lesson                Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
 }
 
 model SelectionComment {

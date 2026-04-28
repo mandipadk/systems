@@ -3,6 +3,7 @@
 import { MouseEvent, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Bookmark, Check, Loader2, MessageSquare, RefreshCcw, X } from "lucide-react";
 import { Mermaid } from "@/components/Mermaid";
 
@@ -287,7 +288,7 @@ export function CourseReader({ course }: { course: Course }) {
                   </div>
 
                   <div className="prose-book">
-                    <ReactMarkdown>{lesson.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{lesson.content}</ReactMarkdown>
                   </div>
 
                   {lesson.diagram ? (
@@ -339,7 +340,7 @@ export function CourseReader({ course }: { course: Course }) {
                             {comment.prompt}
                           </p>
                           <div className="prose-book mt-2 text-[0.98rem]">
-                            <ReactMarkdown>{comment.response}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{comment.response}</ReactMarkdown>
                           </div>
                         </div>
                       ))}

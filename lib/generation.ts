@@ -10,11 +10,45 @@ import {
   type GeneratedCourse,
   type GeneratedLesson
 } from "./course-schema";
-import { createFallbackCourse } from "./fallback-course";
 import { getPath } from "./paths";
 
 const activeRuns = new Set<string>();
-const OPENAI_TIMEOUT_MS = 90_000;
+const OPENAI_TIMEOUT_MS = 180_000;
+const lessonReviewJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["overallScore", "shouldRevise", "issues", "revisionInstructions"],
+  properties: {
+    overallScore: { type: "integer", minimum: 1, maximum: 10 },
+    shouldRevise: { type: "boolean" },
+    issues: {
+      type: "array",
+      items: { type: "string" }
+    },
+    revisionInstructions: { type: "string" }
+  }
+} as const;
+
+type LessonReview = {
+  overallScore: number;
+  shouldRevise: boolean;
+  issues: string[];
+  revisionInstructions: string;
+};
+
+type LessonWithQuality = GeneratedLesson & {
+  qualityReview?: LessonReview & { revised: boolean };
+};
+
+type CourseWithQuality = Omit<GeneratedCourse, "modules"> & {
+  modules: Array<Omit<GeneratedCourse["modules"][number], "lessons"> & {
+    lessons: LessonWithQuality[];
+  }>;
+};
+
+export function normalizeTopicKey(topic: string) {
+  return topic.trim().toLocaleLowerCase();
+}
 
 function getTopic(topic?: string | null, pathId?: string | null) {
   const selectedPath = getPath(pathId);
@@ -60,6 +94,41 @@ function createOpenAIClient() {
     timeout: OPENAI_TIMEOUT_MS,
     maxRetries: 1
   });
+}
+
+function requireOpenAIKey() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured. Add it to .env and restart the dev server before generating a course.");
+  }
+}
+
+async function formatGenerationError(error: unknown, runId: string) {
+  const run = await prisma.generationRun.findUnique({
+    where: { id: runId },
+    select: { phase: true }
+  });
+  const phase = run?.phase || "generation";
+  const raw = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : "";
+  const lower = `${name} ${raw}`.toLowerCase();
+
+  if (lower.includes("timeout") || lower.includes("timed out")) {
+    return `The OpenAI request timed out while ${phase}. This usually means the lesson request was too large or the model/tool call took too long. Nothing was saved for this failed run. Try again, or narrow the topic slightly. The app now uses longer per-request timeouts, but frontier/long-form topics can still occasionally need a retry.`;
+  }
+
+  if (lower.includes("rate limit") || lower.includes("429")) {
+    return `OpenAI rate-limited the request while ${phase}. Wait a bit and retry. Nothing was saved for this failed run.`;
+  }
+
+  if (lower.includes("401") || lower.includes("api key") || lower.includes("authentication")) {
+    return `OpenAI authentication failed while ${phase}. Check OPENAI_API_KEY in .env, then restart the dev server.`;
+  }
+
+  if (lower.includes("json") || lower.includes("zod") || lower.includes("parse")) {
+    return `The model returned malformed structured content while ${phase}. This is a content-format failure, not your fault. Try regenerating; the pipeline will ask for stricter structured output again. Technical detail: ${raw}`;
+  }
+
+  return `Generation failed while ${phase}. Nothing was saved for this failed run. Technical detail: ${raw}`;
 }
 
 async function createCourseOutline(client: OpenAI, topic: string): Promise<CourseOutline> {
@@ -148,6 +217,7 @@ Requirements:
 - Use concrete examples, worked traces, small code listings when relevant, edge cases, and common mistakes.
 - Prefer compact sections with meaningful headings. Avoid one-sentence paragraphs.
 - Include at least one of: a step-by-step trace, a comparison table, a code walkthrough, or a miniature design review.
+- If you include a table, use valid GitHub-flavored Markdown table syntax with a header separator row.
 - Include a valid Mermaid diagram when it helps. Prefer simple flowchart TD syntax like A["label"] --> B["label"]. Do not wrap the diagram in markdown fences.
 - checkpoint must test the core invariant or mental model.
 - exercisePrompt must be solvable without feeling impossible.
@@ -162,10 +232,122 @@ Requirements:
   return normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
 }
 
+async function reviewLesson(client: OpenAI, input: {
+  topic: string;
+  moduleTitle: string;
+  lessonBrief: string;
+  lesson: GeneratedLesson;
+}): Promise<LessonReview> {
+  const response = await client.responses.create({
+    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    max_output_tokens: 1600,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "lesson_review",
+        schema: lessonReviewJsonSchema,
+        strict: true
+      }
+    },
+    input: [
+      {
+        role: "system",
+        content:
+          "You are a severe editor for a personal technical book. Your job is to detect shallow AI writing, missing examples, weak explanations, broken structure, and content that would not help a serious learner. Be strict."
+      },
+      {
+        role: "user",
+        content: `Review this generated lesson for the Systems learning platform.
+
+Topic: ${input.topic}
+Module: ${input.moduleTitle}
+Lesson goal: ${input.lessonBrief}
+
+Standards:
+- Must feel like a carefully curated technical book chapter, not a blog summary.
+- Must include concrete examples, worked traces or code walkthroughs, edge cases, common mistakes, and a comparison table when useful.
+- Must teach from first principles before interview/system transfer.
+- Must avoid vague paragraphs, listicle filler, motivational fluff, and generic advice.
+- Practice must be approachable but non-trivial.
+- Diagram must be simple enough for Mermaid to parse.
+
+Lesson JSON:
+${JSON.stringify(input.lesson)}
+
+Return a strict review. Set shouldRevise true for anything below an 8.`
+      }
+    ]
+  } as never, { timeout: OPENAI_TIMEOUT_MS });
+
+  return JSON.parse(extractText(response)) as LessonReview;
+}
+
+async function reviseLesson(client: OpenAI, input: {
+  topic: string;
+  outline: CourseOutline;
+  moduleTitle: string;
+  moduleSummary: string;
+  lessonTitle: string;
+  lessonBrief: string;
+  draft: GeneratedLesson;
+  review: LessonReview;
+}): Promise<GeneratedLesson> {
+  const sources = input.outline.sources
+    .map((source, index) => `${index}. ${source.title} - ${source.url}`)
+    .join("\n");
+
+  const response = await client.responses.create({
+    model: process.env.OPENAI_MODEL || "gpt-4.1",
+    max_output_tokens: 9500,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "revised_course_lesson",
+        schema: lessonJsonSchema,
+        strict: true
+      }
+    },
+    input: [
+      {
+        role: "system",
+        content:
+          "You revise technical lessons into serious book-quality chapters. Address every editor issue directly. Preserve correctness, add concrete substance, and remove generic filler."
+      },
+      {
+        role: "user",
+        content: `Course topic: ${input.topic}
+Course title: ${input.outline.title}
+Module: ${input.moduleTitle}
+Module summary: ${input.moduleSummary}
+Lesson title: ${input.lessonTitle}
+Lesson goal: ${input.lessonBrief}
+
+Allowed source indexes:
+${sources}
+
+Editor score: ${input.review.overallScore}/10
+Editor issues:
+${input.review.issues.map((issue) => `- ${issue}`).join("\n")}
+
+Revision instructions:
+${input.review.revisionInstructions}
+
+Draft lesson:
+${JSON.stringify(input.draft)}
+
+Return the full revised lesson JSON. Make the content denser, more concrete, and more book-like. Include GFM tables where comparison clarifies the concept. Mermaid diagrams must be valid and not wrapped in code fences.`
+      }
+    ]
+  } as never, { timeout: OPENAI_TIMEOUT_MS });
+
+  return normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
+}
+
 async function callOpenAIForCourse(
   topic: string,
   onProgress: (phase: string, progress: number) => Promise<void>
-): Promise<GeneratedCourse> {
+): Promise<CourseWithQuality> {
+  requireOpenAIKey();
   const client = createOpenAIClient();
 
   await onProgress("researching sources and outlining course", 20);
@@ -173,23 +355,46 @@ async function callOpenAIForCourse(
 
   const totalLessons = outline.modules.reduce((sum, module) => sum + module.lessons.length, 0);
   let completedLessons = 0;
-  const modules: GeneratedCourse["modules"] = [];
+  const modules: CourseWithQuality["modules"] = [];
 
   for (const module of outline.modules) {
     const lessons: GeneratedLesson[] = [];
     for (const lesson of module.lessons) {
       const progress = 25 + Math.floor((completedLessons / Math.max(totalLessons, 1)) * 60);
       await onProgress(`writing lesson ${completedLessons + 1} of ${totalLessons}: ${lesson.title}`, progress);
-      lessons.push(
-        await createLesson(client, {
-          topic,
-          outline,
-          moduleTitle: module.title,
-          moduleSummary: module.summary,
-          lessonTitle: lesson.title,
-          lessonBrief: lesson.brief
-        })
-      );
+      const draft = await createLesson(client, {
+        topic,
+        outline,
+        moduleTitle: module.title,
+        moduleSummary: module.summary,
+        lessonTitle: lesson.title,
+        lessonBrief: lesson.brief
+      });
+      await onProgress(`reviewing lesson ${completedLessons + 1} of ${totalLessons}: ${lesson.title}`, progress + 2);
+      const review = await reviewLesson(client, {
+        topic,
+        moduleTitle: module.title,
+        lessonBrief: lesson.brief,
+        lesson: draft
+      });
+      const finalLesson: LessonWithQuality =
+        review.shouldRevise || review.overallScore < 8
+          ? await reviseLesson(client, {
+              topic,
+              outline,
+              moduleTitle: module.title,
+              moduleSummary: module.summary,
+              lessonTitle: lesson.title,
+              lessonBrief: lesson.brief,
+              draft,
+              review
+            })
+          : draft;
+      finalLesson.qualityReview = {
+        ...review,
+        revised: finalLesson !== draft
+      };
+      lessons.push(finalLesson);
       completedLessons += 1;
     }
     modules.push({
@@ -208,10 +413,11 @@ async function callOpenAIForCourse(
   });
 }
 
-async function persistCourse(runId: string, topic: string, pathId: string | null, course: GeneratedCourse) {
+async function persistCourse(runId: string, topic: string, pathId: string | null, course: CourseWithQuality) {
   const saved = await prisma.course.create({
     data: {
       topic,
+      topicKey: normalizeTopicKey(topic),
       pathId,
       title: course.title,
       summary: course.summary,
@@ -245,7 +451,18 @@ async function persistCourse(runId: string, topic: string, pathId: string | null
               hint: lesson.hint,
               solution: lesson.solution,
               transferNote: lesson.transferNote,
-              citations: lesson.citations
+              citations: lesson.citations,
+              qualityReview: lesson.qualityReview
+                ? {
+                    create: {
+                      overallScore: lesson.qualityReview.overallScore,
+                      shouldRevise: lesson.qualityReview.shouldRevise,
+                      issues: lesson.qualityReview.issues,
+                      revisionInstructions: lesson.qualityReview.revisionInstructions,
+                      revised: lesson.qualityReview.revised
+                    }
+                  }
+                : undefined
             }))
           }
         }))
@@ -266,33 +483,35 @@ async function persistCourse(runId: string, topic: string, pathId: string | null
   return saved.id;
 }
 
-export async function createGenerationRun(input: { topic?: string; pathId?: string }) {
+export async function createGenerationRun(input: { topic?: string; pathId?: string; replaceCourseId?: string }) {
   const topic = getTopic(input.topic, input.pathId);
   if (!topic) {
     throw new Error("A topic or pathId is required.");
   }
+  requireOpenAIKey();
 
   const run = await prisma.generationRun.create({
     data: {
       topic,
+      replaceCourseId: input.replaceCourseId,
       phase: "queued",
       status: "queued",
       progress: 0
     }
   });
 
-  queueGeneration(run.id, topic, input.pathId ?? null);
+  queueGeneration(run.id, topic, input.pathId ?? null, input.replaceCourseId);
   return run;
 }
 
-export function queueGeneration(runId: string, topic: string, pathId: string | null) {
+export function queueGeneration(runId: string, topic: string, pathId: string | null, replaceCourseId?: string | null) {
   if (activeRuns.has(runId)) return;
   activeRuns.add(runId);
 
   setTimeout(() => {
-    generateCourseForRun(runId, topic, pathId)
+    generateCourseForRun(runId, topic, pathId, replaceCourseId ?? null)
       .catch(async (error: unknown) => {
-        const message = error instanceof Error ? error.message : "Unknown generation error";
+        const message = await formatGenerationError(error, runId);
         await prisma.generationRun.update({
           where: { id: runId },
           data: { status: "failed", phase: "failed", error: message }
@@ -304,20 +523,22 @@ export function queueGeneration(runId: string, topic: string, pathId: string | n
   }, 10);
 }
 
-export async function generateCourseForRun(runId: string, topic: string, pathId: string | null) {
+export async function generateCourseForRun(runId: string, topic: string, pathId: string | null, replaceCourseId?: string | null) {
   await updateRun(runId, "researching", 15);
-  const hasKey = Boolean(process.env.OPENAI_API_KEY);
 
-  await updateRun(runId, hasKey ? "generating course with cited research" : "generating local fallback course", 35);
-  const course = hasKey
-    ? await callOpenAIForCourse(topic, (phase, progress) => updateRun(runId, phase, progress))
-    : createFallbackCourse(topic);
+  await updateRun(runId, "generating course with cited research", 35);
+  const course = await callOpenAIForCourse(topic, (phase, progress) => updateRun(runId, phase, progress));
 
   await updateRun(runId, "validating structure", 75);
   const validated = generatedCourseSchema.parse(course);
 
   await updateRun(runId, "saving course", 90);
-  return persistCourse(runId, topic, pathId, validated);
+  const savedId = await persistCourse(runId, topic, pathId, { ...validated, modules: course.modules });
+  if (replaceCourseId && replaceCourseId !== savedId) {
+    await updateRun(runId, "replacing previous course", 96);
+    await prisma.course.delete({ where: { id: replaceCourseId } }).catch(() => null);
+  }
+  return savedId;
 }
 
 export async function regenerateLesson(lessonId: string) {
@@ -336,12 +557,10 @@ export async function regenerateLesson(lessonId: string) {
 
   if (!lesson) throw new Error("Lesson not found.");
 
+  requireOpenAIKey();
   let replacement: GeneratedLesson;
-  if (!process.env.OPENAI_API_KEY) {
-    replacement = createFallbackCourse(`${lesson.module.course.topic}: ${lesson.title}`).modules[0].lessons[0];
-  } else {
-    const client = createOpenAIClient();
-    const response = await client.responses.create({
+  const client = createOpenAIClient();
+  const response = await client.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-4.1",
       max_output_tokens: 7000,
       tools: [{ type: "web_search_preview" }],
@@ -370,9 +589,8 @@ ${lesson.content}
 Return one complete lesson with markdown content, Mermaid diagram, checkpoint, exercise, hint, solution, transfer note, and source citation indexes.`
         }
       ]
-    } as never, { timeout: OPENAI_TIMEOUT_MS });
-    replacement = normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
-  }
+  } as never, { timeout: OPENAI_TIMEOUT_MS });
+  replacement = normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
 
   return prisma.lesson.update({
     where: { id: lessonId },
@@ -397,10 +615,7 @@ export async function explainSelectedText(input: {
   selectedText: string;
   prompt: string;
 }) {
-  if (!process.env.OPENAI_API_KEY) {
-    return `You selected: "${input.selectedText}"\n\n${input.prompt}\n\nAdd OPENAI_API_KEY to generate a deeper contextual explanation.`;
-  }
-
+  requireOpenAIKey();
   const client = createOpenAIClient();
   const response = await client.responses.create({
     model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",

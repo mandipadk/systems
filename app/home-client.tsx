@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowRight, BookOpen, Loader2, Sparkles } from "lucide-react";
+import { ArrowRight, BookOpen, Loader2, Sparkles, X } from "lucide-react";
 import type { LearningPath } from "@/lib/paths";
 
 type CourseListItem = {
@@ -24,6 +24,22 @@ type RunState = {
   error?: string | null;
 };
 
+type DuplicateCourse = {
+  id: string;
+  title: string;
+  topic: string;
+  summary: string;
+  level: string;
+  updatedAt: string;
+};
+
+type CreatePayload = {
+  topic?: string;
+  pathId?: string;
+  force?: boolean;
+  replaceCourseId?: string;
+};
+
 function removeLeakedMermaidErrors() {
   Array.from(document.body.children).forEach((node) => {
     const text = node.textContent ?? "";
@@ -39,16 +55,20 @@ export function HomeClient({ paths, courses }: { paths: LearningPath[]; courses:
   const [run, setRun] = useState<RunState | null>(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [duplicate, setDuplicate] = useState<DuplicateCourse | null>(null);
+  const [pendingPayload, setPendingPayload] = useState<CreatePayload | null>(null);
 
-  const canSubmit = useMemo(() => topic.trim().length > 2 && !creating && !run, [topic, creating, run]);
+  const activeRun = Boolean(run && run.status !== "failed");
+  const canSubmit = useMemo(() => topic.trim().length > 2 && !creating && !activeRun, [topic, creating, activeRun]);
 
   useEffect(() => {
     removeLeakedMermaidErrors();
   }, []);
 
-  async function createCourse(payload: { topic?: string; pathId?: string }) {
+  async function createCourse(payload: CreatePayload) {
     setError("");
     setCreating(true);
+    setDuplicate(null);
     try {
       const response = await fetch("/api/courses", {
         method: "POST",
@@ -56,6 +76,11 @@ export function HomeClient({ paths, courses }: { paths: LearningPath[]; courses:
         body: JSON.stringify(payload)
       });
       const data = await response.json();
+      if (response.status === 409 && data.duplicate) {
+        setDuplicate(data.duplicate);
+        setPendingPayload(payload);
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "Unable to create course.");
       setRun({ id: data.runId, status: "queued", phase: "queued", progress: 0 });
     } catch (caught) {
@@ -103,6 +128,53 @@ export function HomeClient({ paths, courses }: { paths: LearningPath[]; courses:
 
   return (
     <main className="min-h-screen px-5 py-8 sm:px-8">
+      {duplicate && pendingPayload ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/20 px-4">
+          <div className="w-full max-w-lg border border-rule bg-paper p-5 shadow-[0_24px_70px_rgba(31,37,35,0.22)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brick">Exact topic match</p>
+                <h2 className="mt-2 font-serif text-2xl text-ink">You already have this course.</h2>
+              </div>
+              <button
+                aria-label="Close duplicate warning"
+                onClick={() => {
+                  setDuplicate(null);
+                  setPendingPayload(null);
+                }}
+                className="text-ink/45 transition hover:text-ink"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-4 border border-rule bg-white/40 p-4">
+              <h3 className="font-serif text-xl text-ink">{duplicate.title}</h3>
+              <p className="mt-2 line-clamp-3 text-sm leading-6 text-ink/65">{duplicate.summary}</p>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-3">
+              <button
+                onClick={() => router.push(`/courses/${duplicate.id}`)}
+                className="min-h-11 border border-rule px-3 text-sm text-ink/70 transition hover:border-moss hover:text-ink"
+              >
+                Open existing
+              </button>
+              <button
+                onClick={() => createCourse({ ...pendingPayload, force: true })}
+                className="min-h-11 border border-rule px-3 text-sm text-ink/70 transition hover:border-moss hover:text-ink"
+              >
+                Create another
+              </button>
+              <button
+                onClick={() => createCourse({ ...pendingPayload, force: true, replaceCourseId: duplicate.id })}
+                className="min-h-11 bg-ink px-3 text-sm text-paper transition hover:bg-steel"
+              >
+                Replace existing
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <section className="mx-auto flex min-h-[58vh] w-full max-w-4xl flex-col justify-center">
         <div className="mb-10">
           <p className="mb-4 text-sm uppercase tracking-[0.22em] text-moss">Systems</p>
@@ -131,14 +203,25 @@ export function HomeClient({ paths, courses }: { paths: LearningPath[]; courses:
         {run ? (
           <div className="mt-6 border border-rule bg-paper/70 p-5">
             <div className="mb-3 flex items-center gap-3 text-sm text-steel">
-              <Loader2 className="h-4 w-4 animate-spin" />
+              {run.status === "failed" ? null : <Loader2 className="h-4 w-4 animate-spin" />}
               <span>{run.phase}</span>
               <span>{run.progress}%</span>
             </div>
             <div className="h-2 bg-rule">
-              <div className="h-full bg-moss transition-all" style={{ width: `${run.progress}%` }} />
+              <div
+                className={`h-full transition-all ${run.status === "failed" ? "bg-brick" : "bg-moss"}`}
+                style={{ width: `${run.progress}%` }}
+              />
             </div>
             {run.error ? <p className="mt-3 text-sm text-brick">{run.error}</p> : null}
+            {run.status === "failed" ? (
+              <button
+                onClick={() => setRun(null)}
+                className="mt-4 border border-rule px-3 py-2 text-sm text-ink/70 transition hover:border-moss hover:text-ink"
+              >
+                Dismiss
+              </button>
+            ) : null}
           </div>
         ) : null}
 
@@ -156,7 +239,7 @@ export function HomeClient({ paths, courses }: { paths: LearningPath[]; courses:
               <button
                 key={path.id}
                 onClick={() => createCourse({ pathId: path.id })}
-                disabled={Boolean(run) || creating}
+                disabled={Boolean(activeRun) || creating}
                 className="border border-rule bg-paper/65 p-4 text-left transition hover:border-moss hover:bg-paper disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <h2 className="font-serif text-2xl text-ink">{path.title}</h2>
