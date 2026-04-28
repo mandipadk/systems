@@ -78,6 +78,30 @@ function extractText(response: unknown) {
   return JSON.stringify(response);
 }
 
+function parseResponseJson<T>(response: unknown, context: string): T {
+  const maybe = response as {
+    output_text?: string;
+    status?: string;
+    incomplete_details?: unknown;
+  };
+
+  if (maybe.status === "incomplete") {
+    throw new Error(
+      `${context} returned an incomplete response. Details: ${JSON.stringify(maybe.incomplete_details ?? {})}`
+    );
+  }
+
+  const text = extractText(response).trim();
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${context} returned malformed JSON. ${detail}. Response prefix: ${text.slice(0, 500)}`
+    );
+  }
+}
+
 function toInputJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
@@ -142,6 +166,85 @@ function validateLessonArtifacts(lesson: GeneratedLesson, sourceCount: number) {
     flashcardCount: lesson.reviewArtifacts?.flashcards?.length ?? 0,
     oralPromptCount: lesson.reviewArtifacts?.oralPrompts?.length ?? 0,
     implementationDrillCount: lesson.reviewArtifacts?.implementationDrills?.length ?? 0
+  };
+}
+
+function lessonReviewExcerpt(lesson: GeneratedLesson) {
+  return {
+    title: lesson.title,
+    contentExcerpt: lesson.content.slice(0, 7000),
+    checkpoint: lesson.checkpoint,
+    exercisePrompt: lesson.exercisePrompt,
+    solutionExcerpt: lesson.solution.slice(0, 1200),
+    transferNote: lesson.transferNote,
+    citationCount: lesson.citations.length,
+    hasDiagram: Boolean(lesson.diagram),
+    mistakeBankCount: lesson.mistakeBank?.length ?? 0,
+    reviewArtifacts: {
+      flashcardCount: lesson.reviewArtifacts?.flashcards?.length ?? 0,
+      oralPromptCount: lesson.reviewArtifacts?.oralPrompts?.length ?? 0,
+      implementationDrillCount: lesson.reviewArtifacts?.implementationDrills?.length ?? 0
+    }
+  };
+}
+
+function localReviewLesson(input: {
+  perspective: "technical-correctness" | "pedagogy" | "interview-transfer" | "anti-laziness";
+  lesson: GeneratedLesson;
+  sourceCount: number;
+  error?: unknown;
+}): LessonReview {
+  const checks = validateLessonArtifacts(input.lesson, input.sourceCount);
+  const issues: string[] = [];
+  let score = 9;
+
+  if (checks.wordCount < 1100) {
+    score -= 2;
+    issues.push(`Content is short for a book-like lesson (${checks.wordCount} words).`);
+  }
+  if (!checks.validCitations || checks.citationCount === 0) {
+    score -= 1;
+    issues.push("Citations are missing or invalid.");
+  }
+  if (!checks.hasTable) {
+    score -= 1;
+    issues.push("No valid GitHub-flavored Markdown table was detected.");
+  }
+  if (checks.codeFenceCount === 0) {
+    score -= 1;
+    issues.push("No code or pseudocode block was detected.");
+  }
+  if (!checks.hasBalancedCodeFences) {
+    score -= 1;
+    issues.push("Code fences appear unbalanced.");
+  }
+  if (checks.diagramStatus !== "present-normalized") {
+    score -= 1;
+    issues.push("No valid normalized Mermaid diagram was detected.");
+  }
+  if (checks.mistakeBankCount < 2) {
+    score -= 1;
+    issues.push("Mistake bank is too thin.");
+  }
+  if (checks.implementationDrillCount < 1) {
+    score -= 1;
+    issues.push("No implementation drill was detected.");
+  }
+  if (input.error) {
+    score = Math.min(score, 7);
+    const message = input.error instanceof Error ? input.error.message : String(input.error);
+    issues.push(`Model reviewer failed, so deterministic local review was used. ${message.slice(0, 240)}`);
+  }
+
+  const boundedScore = Math.max(1, Math.min(10, score));
+  return {
+    overallScore: boundedScore,
+    shouldRevise: boundedScore < 8,
+    issues,
+    revisionInstructions:
+      issues.length > 0
+        ? `Address these ${input.perspective} issues directly: ${issues.join(" ")}`
+        : `No major ${input.perspective} issues detected by deterministic checks.`
   };
 }
 
@@ -224,7 +327,7 @@ Requirements:
     ]
   } as never, { timeout: OPENAI_TIMEOUT_MS });
 
-  return courseOutlineSchema.parse(JSON.parse(extractText(response)));
+  return courseOutlineSchema.parse(parseResponseJson(response, "course outline generation"));
 }
 
 async function createLesson(client: OpenAI, input: {
@@ -295,7 +398,7 @@ Requirements:
     ]
   } as never, { timeout: OPENAI_TIMEOUT_MS });
 
-  return normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
+  return normalizeLesson(sectionSchema.parse(parseResponseJson(response, `lesson generation for ${input.lessonTitle}`)));
 }
 
 async function reviewLesson(client: OpenAI, input: {
@@ -303,27 +406,29 @@ async function reviewLesson(client: OpenAI, input: {
   moduleTitle: string;
   lessonBrief: string;
   lesson: GeneratedLesson;
+  sourceCount: number;
   perspective: "technical-correctness" | "pedagogy" | "interview-transfer" | "anti-laziness";
 }): Promise<LessonReview> {
-  const response = await client.responses.create({
-    model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    max_output_tokens: 1600,
-    text: {
-      format: {
-        type: "json_schema",
-        name: "lesson_review",
-        schema: lessonReviewJsonSchema,
-        strict: true
-      }
-    },
-    input: [
-      {
-        role: "system",
-        content: `You are a severe ${input.perspective} editor for a personal technical book. Your job is to detect shallow AI writing, missing examples, weak explanations, broken structure, and content that would not help a serious learner. Be strict.`
+  try {
+    const response = await client.responses.create({
+      model: process.env.OPENAI_FAST_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      max_output_tokens: 3000,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "lesson_review",
+          schema: lessonReviewJsonSchema,
+          strict: true
+        }
       },
-      {
-        role: "user",
-        content: `Review this generated lesson for the Systems learning platform.
+      input: [
+        {
+          role: "system",
+          content: `You are a severe ${input.perspective} editor for a personal technical book. Your job is to detect shallow AI writing, missing examples, weak explanations, broken structure, and content that would not help a serious learner. Be strict.`
+        },
+        {
+          role: "user",
+          content: `Review this generated lesson for the Systems learning platform.
 
 Topic: ${input.topic}
 Module: ${input.moduleTitle}
@@ -337,15 +442,23 @@ Standards:
 - Practice must be approachable but non-trivial.
 - Diagram must be simple enough for Mermaid to parse.
 
-Lesson JSON:
-${JSON.stringify(input.lesson)}
+Lesson excerpt and metadata:
+${JSON.stringify(lessonReviewExcerpt(input.lesson))}
 
 Return a strict review. Set shouldRevise true for anything below an 8.`
-      }
-    ]
-  } as never, { timeout: OPENAI_TIMEOUT_MS });
+        }
+      ]
+    } as never, { timeout: OPENAI_TIMEOUT_MS });
 
-  return JSON.parse(extractText(response)) as LessonReview;
+    return parseResponseJson(response, `${input.perspective} lesson review`);
+  } catch (error) {
+    return localReviewLesson({
+      perspective: input.perspective,
+      lesson: input.lesson,
+      sourceCount: input.sourceCount,
+      error
+    });
+  }
 }
 
 async function reviseLesson(client: OpenAI, input: {
@@ -409,7 +522,7 @@ Return the full revised lesson JSON. Make the content denser, more concrete, and
     ]
   } as never, { timeout: OPENAI_TIMEOUT_MS });
 
-  return normalizeLesson(sectionSchema.parse(JSON.parse(extractText(response))));
+  return normalizeLesson(sectionSchema.parse(parseResponseJson(response, `lesson revision for ${input.lessonTitle}`)));
 }
 
 function combineReviews(reviews: Array<LessonReview & { perspective: string }>, checks: ReturnType<typeof validateLessonArtifacts>) {
@@ -470,6 +583,7 @@ async function callOpenAIForCourse(
             moduleTitle: module.title,
             lessonBrief: lesson.brief,
             lesson: draft,
+            sourceCount: outline.sources.length,
             perspective
           })),
           perspective
@@ -477,6 +591,7 @@ async function callOpenAIForCourse(
       );
       const draftChecks = validateLessonArtifacts(draft, outline.sources.length);
       const review = combineReviews(reviews, draftChecks);
+      let revisionFailed = false;
       const finalLesson: LessonWithQuality =
         review.shouldRevise || review.overallScore < 8
           ? await reviseLesson(client, {
@@ -489,14 +604,21 @@ async function callOpenAIForCourse(
               contract: lesson.contract,
               draft,
               review
+            }).catch((error: unknown) => {
+              revisionFailed = true;
+              const message = error instanceof Error ? error.message : String(error);
+              review.issues.push(`revision: Model revision failed; keeping reviewed draft. ${message.slice(0, 240)}`);
+              review.shouldRevise = false;
+              review.overallScore = Math.min(review.overallScore, 7);
+              return draft;
             })
           : draft;
       const finalChecks = validateLessonArtifacts(finalLesson, outline.sources.length);
       finalLesson.contract = lesson.contract;
       finalLesson.qualityReview = {
         ...review,
-        revised: finalLesson !== draft,
-        revisionCount: finalLesson !== draft ? 1 : 0,
+        revised: finalLesson !== draft && !revisionFailed,
+        revisionCount: finalLesson !== draft && !revisionFailed ? 1 : 0,
         sourceCoverage: finalChecks.sourceCoverage,
         exerciseDifficulty: "moderate",
         diagramStatus: finalChecks.diagramStatus,
